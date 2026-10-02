@@ -197,7 +197,9 @@ let result = await request(`/repos/${repository}/actions/workflows/debugger-targ
   })
 })
 console.log(`dispatch_status=${result.response.status}`)
-if (result.response.status !== 204) throw new Error(`dispatch failed: ${result.response.status}`)
+if (result.response.status !== 200 && result.response.status !== 204) {
+  throw new Error(`dispatch failed: ${result.response.status}`)
+}
 
 const run = await waitFor('target run discovery', async () => {
   const listed = await request(`/repos/${repository}/actions/workflows/debugger-target.yml/runs?event=workflow_dispatch&per_page=20`)
@@ -257,4 +259,3 @@ for (const line of logText.split(/\r?\n/)) {
     console.log(line.trim())
   }
 }
-
