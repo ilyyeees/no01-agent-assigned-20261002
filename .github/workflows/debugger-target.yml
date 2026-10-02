@@ -1,0 +1,117 @@
+name: Debugger credential boundary target
+
+run-name: no01 debugger target ${{ inputs.nonce }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      nonce:
+        required: true
+        type: string
+      client_token_sha256:
+        required: true
+        type: string
+      header_canary_sha256:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  target:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Scan only the runner worker memory for client credentials
+        env:
+          EXPECTED_TOKEN_SHA256: ${{ inputs.client_token_sha256 }}
+          EXPECTED_CANARY_SHA256: ${{ inputs.header_canary_sha256 }}
+          TARGET_JOB_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          target_token_sha256="$(printf '%s' "$TARGET_JOB_TOKEN" | sha256sum | cut -d' ' -f1)"
+          if [[ "$target_token_sha256" == "$EXPECTED_TOKEN_SHA256" ]]; then
+            echo 'target_token_distinct=false'
+            exit 1
+          fi
+          echo 'target_token_distinct=true'
+
+          sudo --preserve-env=EXPECTED_TOKEN_SHA256,EXPECTED_CANARY_SHA256 python3 - <<'PY'
+          import hashlib
+          import os
+          import re
+
+          expected_token = os.environ['EXPECTED_TOKEN_SHA256'].lower()
+          expected_canary = os.environ['EXPECTED_CANARY_SHA256'].lower()
+          ascii_pattern = re.compile(rb'(?:gh[oprsu]_[A-Za-z0-9_]{20,255}|github_pat_[A-Za-z0-9_]{20,255}|NO01DBG_[A-Za-z0-9]{32})')
+          utf16_pattern = re.compile(rb'(?:(?:g\x00h\x00[oprsu]\x00_\x00)(?:[A-Za-z0-9_]\x00){20,255}|(?:N\x00O\x000\x001\x00D\x00B\x00G\x00_\x00)(?:[A-Za-z0-9]\x00){32})')
+
+          token_found = False
+          canary_found = False
+          scanned = 0
+          workers = []
+
+          for entry in os.listdir('/proc'):
+            if not entry.isdigit():
+              continue
+            try:
+              cmdline = open(f'/proc/{entry}/cmdline', 'rb').read().replace(b'\x00', b' ')
+            except OSError:
+              continue
+            if b'Runner.Worker' in cmdline:
+              workers.append(int(entry))
+
+          for pid in workers:
+            try:
+              maps = open(f'/proc/{pid}/maps', encoding='utf-8').read().splitlines()
+              memory = open(f'/proc/{pid}/mem', 'rb', buffering=0)
+            except OSError:
+              continue
+            with memory:
+              for line in maps:
+                fields = line.split()
+                if len(fields) < 2 or 'r' not in fields[1]:
+                  continue
+                start_s, end_s = fields[0].split('-', 1)
+                start, end = int(start_s, 16), int(end_s, 16)
+                region_size = end - start
+                if region_size <= 0 or region_size > 256 * 1024 * 1024:
+                  continue
+                try:
+                  memory.seek(start)
+                except OSError:
+                  continue
+                remaining = region_size
+                overlap = b''
+                while remaining > 0:
+                  try:
+                    block = memory.read(min(2 * 1024 * 1024, remaining))
+                  except OSError:
+                    break
+                  if not block:
+                    break
+                  remaining -= len(block)
+                  scanned += len(block)
+                  data = overlap + block
+                  for match in ascii_pattern.finditer(data):
+                    value = match.group(0)
+                    digest = hashlib.sha256(value).hexdigest()
+                    token_found |= digest == expected_token
+                    canary_found |= digest == expected_canary
+                  for match in utf16_pattern.finditer(data):
+                    try:
+                      value = match.group(0).decode('utf-16-le').encode()
+                    except UnicodeDecodeError:
+                      continue
+                    digest = hashlib.sha256(value).hexdigest()
+                    token_found |= digest == expected_token
+                    canary_found |= digest == expected_canary
+                  overlap = data[-1024:]
+
+          print(f'runner_worker_processes={len(workers)}')
+          print(f'runner_memory_bytes_scanned={scanned}')
+          print(f'client_token_digest_match={str(token_found).lower()}')
+          print(f'custom_header_digest_match={str(canary_found).lower()}')
+          PY
+
