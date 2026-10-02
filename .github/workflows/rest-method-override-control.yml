@@ -28,6 +28,6 @@ jobs:
               --header "${header}: POST" \
               --data "${body}" \
               "${api}")
-            message=$(jq -r '.message // empty' "response-${header}.json")
+            message=$(jq -r 'if type == "object" then (.message // "") else "" end' "response-${header}.json")
             echo "::notice title=${header}::status=${code} message=${message}"
           done
