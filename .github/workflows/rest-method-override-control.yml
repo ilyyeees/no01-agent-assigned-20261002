@@ -1,0 +1,33 @@
+name: REST method override control
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe override headers on GET
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -u
+          api="https://api.github.com/repos/${REPOSITORY}/issues"
+          body='{"title":"NO01 method override control","body":"Harmless controlled probe."}'
+          for header in X-HTTP-Method-Override X-Method-Override X-HTTP-Method; do
+            code=$(curl --silent --show-error --output "response-${header}.json" --write-out '%{http_code}' \
+              --request GET \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'Content-Type: application/json' \
+              --header "${header}: POST" \
+              --data "${body}" \
+              "${api}")
+            message=$(jq -r '.message // empty' "response-${header}.json")
+            echo "::notice title=${header}::status=${code} message=${message}"
+          done
